@@ -159,6 +159,19 @@ async function run(options: RunOptions = {}) {
   });
   server.addHook("preHandler", async (req, reply) => {
     if (req.url.startsWith("/v1/messages")) {
+      // Extract original bearer token from X-Original-Authorization request header
+      const originalAuthHeader = req.headers["x-original-authorization"];
+
+      if (originalAuthHeader) {
+        const authValue = Array.isArray(originalAuthHeader) ? originalAuthHeader[0] : originalAuthHeader;
+        const token = authValue.startsWith("Bearer")
+          ? authValue.split(" ")[1]
+          : authValue;
+
+        req.bearerToken = token;
+        console.log(`[AUTH] Using dynamic API key from X-Original-Authorization`);
+      }
+
       const useAgents = []
 
       for (const agent of agentsManager.getAllAgents()) {

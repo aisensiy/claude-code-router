@@ -139,6 +139,19 @@ const getUseModel = async (
 
 export const router = async (req: any, _res: any, context: any) => {
   const { config, event } = context;
+
+  // If bearer token is available in request, update all providers to use it
+  if (req.bearerToken && config.Providers) {
+    config.Providers.forEach((provider: any) => {
+      // Store the original API key for potential restoration
+      if (!provider._original_api_key) {
+        provider._original_api_key = provider.api_key;
+      }
+      // Use the dynamic bearer token from request
+      provider.api_key = req.bearerToken;
+    });
+    console.log(`[ROUTER] Updated ${config.Providers.length} providers with dynamic API key`);
+  }
   // Parse sessionId from metadata.user_id
   if (req.body.metadata?.user_id) {
     const parts = req.body.metadata.user_id.split("_session_");
