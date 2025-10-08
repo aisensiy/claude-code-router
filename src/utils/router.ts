@@ -63,6 +63,46 @@ const calculateTokenCount = (
   return tokenCount;
 };
 
+interface ProviderTarget {
+  name: string;
+  references: any[];
+  primary: any;
+}
+
+const collectProviderTargets = (config: any): ProviderTarget[] => {
+  const map = new Map<string, ProviderTarget>();
+
+  const registerProviders = (providers?: any[]) => {
+    if (!Array.isArray(providers)) {
+      return;
+    }
+
+    providers.forEach((provider: any) => {
+      if (!provider?.name) {
+        return;
+      }
+
+      const existing = map.get(provider.name);
+      if (existing) {
+        if (!existing.references.includes(provider)) {
+          existing.references.push(provider);
+        }
+      } else {
+        map.set(provider.name, {
+          name: provider.name,
+          references: [provider],
+          primary: provider,
+        });
+      }
+    });
+  };
+
+  registerProviders(config?.Providers);
+  registerProviders(config?.providers);
+
+  return Array.from(map.values());
+};
+
 const getUseModel = async (
   req: any,
   tokenCount: number,
@@ -138,19 +178,72 @@ const getUseModel = async (
 };
 
 export const router = async (req: any, _res: any, context: any) => {
-  const { config, event } = context;
+  const { config, event, server } = context;
 
-  // If bearer token is available in request, update all providers to use it
-  if (req.bearerToken && config.Providers) {
-    config.Providers.forEach((provider: any) => {
-      // Store the original API key for potential restoration
-      if (!provider._original_api_key) {
-        provider._original_api_key = provider.api_key;
+  const providerTargets = collectProviderTargets(config);
+
+  if (req.bearerToken && providerTargets.length) {
+    const token =
+      typeof req.bearerToken === "string" ? req.bearerToken.trim() : "";
+
+    if (token) {
+      const requestId = Symbol("dynamic-api-key");
+      const overrides: any[] = [];
+
+      providerTargets.forEach((target) => {
+        const primary = target.primary;
+        if (!primary) {
+          return;
+        }
+
+        if (typeof primary._static_api_key === "undefined") {
+          primary._static_api_key =
+            primary.api_key ?? primary.apiKey ?? null;
+        }
+
+        const stack: any[] = Array.isArray(primary._dynamic_api_key_stack)
+          ? primary._dynamic_api_key_stack
+          : (primary._dynamic_api_key_stack = []);
+
+        const activeEntry = stack[stack.length - 1];
+        const currentKey =
+          activeEntry?.newKey ?? primary.api_key ?? primary.apiKey ?? null;
+
+        if (currentKey === token) {
+          return;
+        }
+
+        stack.push({ requestId, newKey: token });
+
+        target.references.forEach((ref: any) => {
+          ref.api_key = token;
+          ref.apiKey = token;
+        });
+
+        if (server?.providerService?.getProvider) {
+          const existingProvider = server.providerService.getProvider(
+            target.name
+          );
+          if (existingProvider) {
+            server.providerService.updateProvider(target.name, {
+              apiKey: token,
+            });
+          }
+        }
+
+        overrides.push({
+          target,
+          requestId,
+        });
+      });
+
+      if (overrides.length) {
+        req.dynamicApiKeyOverrides = overrides;
+        console.log(
+          `[ROUTER] Applied dynamic API key to ${overrides.length} provider(s)`
+        );
       }
-      // Use the dynamic bearer token from request
-      provider.api_key = req.bearerToken;
-    });
-    console.log(`[ROUTER] Updated ${config.Providers.length} providers with dynamic API key`);
+    }
   }
   // Parse sessionId from metadata.user_id
   if (req.body.metadata?.user_id) {

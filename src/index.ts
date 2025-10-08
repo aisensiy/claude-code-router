@@ -63,6 +63,10 @@ async function run(options: RunOptions = {}) {
   await cleanupLogFiles();
   const config = await initConfig();
 
+  if (Array.isArray(config.Providers)) {
+    config.providers = config.Providers;
+  }
+
 
   let HOST = config.HOST || "127.0.0.1";
 
@@ -137,6 +141,63 @@ async function run(options: RunOptions = {}) {
     logger: loggerConfig,
   });
 
+  const restoreDynamicApiKeys = (request: any) => {
+    const overrides = request?.dynamicApiKeyOverrides;
+    if (!Array.isArray(overrides) || !overrides.length) {
+      return;
+    }
+
+    // Ensure we only restore once per request
+    request.dynamicApiKeyOverrides = undefined;
+
+    overrides.forEach((override: any) => {
+      const target = override?.target;
+      if (!target?.primary) {
+        return;
+      }
+
+      const stack: any[] = Array.isArray(target.primary._dynamic_api_key_stack)
+        ? target.primary._dynamic_api_key_stack
+        : [];
+
+      if (stack.length) {
+        const entryIndex = stack.findIndex(
+          (entry: any) => entry?.requestId === override.requestId
+        );
+
+        if (entryIndex !== -1) {
+          stack.splice(entryIndex, 1);
+        }
+      }
+
+      const fallbackEntry = stack[stack.length - 1];
+      const finalKey =
+        fallbackEntry?.newKey ??
+        target.primary._static_api_key ??
+        target.primary.api_key ??
+        target.primary.apiKey ??
+        undefined;
+
+      target.references.forEach((ref: any) => {
+        ref.api_key = finalKey;
+        ref.apiKey = finalKey;
+      });
+
+      if (!stack.length) {
+        delete target.primary._dynamic_api_key_stack;
+      }
+
+      if (server?.providerService?.getProvider) {
+        const existingProvider = server.providerService.getProvider(target.name);
+        if (existingProvider) {
+          server.providerService.updateProvider(target.name, {
+            apiKey: finalKey,
+          });
+        }
+      }
+    });
+  };
+
   // Add global error handlers to prevent the service from crashing
   process.on("uncaughtException", (err) => {
     server.logger.error("Uncaught exception:", err);
@@ -202,11 +263,13 @@ async function run(options: RunOptions = {}) {
       }
       await router(req, reply, {
         config,
-        event
+        event,
+        server
       });
     }
   });
   server.addHook("onError", async (request, reply, error) => {
+    restoreDynamicApiKeys(request);
     event.emit('onError', request, reply, error);
   })
   server.addHook("onSend", (req, reply, payload, done) => {
@@ -388,6 +451,9 @@ async function run(options: RunOptions = {}) {
     return payload;
   })
 
+  server.addHook("onResponse", async (req) => {
+    restoreDynamicApiKeys(req);
+  });
 
   server.start();
 }
